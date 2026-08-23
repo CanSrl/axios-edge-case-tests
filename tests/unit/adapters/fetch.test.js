@@ -8,6 +8,7 @@ import {
   generateReadable,
   makeEchoStream,
 } from '../../setup/server.js';
+import { createFetchStub } from '../../setup/mocks.js';
 import axios from '../../../index.js';
 import AxiosError from '../../../lib/core/AxiosError.js';
 import utils from '../../../lib/utils.js';
@@ -1875,5 +1876,71 @@ describe.runIf(typeof fetch === 'function')('supports fetch with nodejs', () => 
         cancelSpy.mockRestore();
       }
     });
+  });
+});
+
+describe.runIf(typeof fetch === 'function')('fetch adapter error mapping', () => {
+  const stubbedAxios = axios.create({ baseURL: LOCAL_SERVER_URL, adapter: 'fetch' });
+
+  const rejectWith = (error) => {
+    const failingFetch = createFetchStub(() => Promise.reject(error));
+
+    return [failingFetch, stubbedAxios.get('/', { env: { fetch: failingFetch } })];
+  };
+
+  it('should not treat an unrelated TypeError as a network error', async () => {
+    const [, request] = rejectWith(new TypeError('something else entirely'));
+    const err = await request.catch((e) => e);
+
+    assert.ok(err instanceof AxiosError);
+    assert.notStrictEqual(err.code, AxiosError.ERR_NETWORK);
+    assert.strictEqual(err.message, 'something else entirely');
+  });
+
+  it.each([['fetch failed'], ['Load failed']])(
+    'should map a TypeError %s to ERR_NETWORK',
+    async (message) => {
+      const [, request] = rejectWith(new TypeError(message));
+      const err = await request.catch((e) => e);
+
+      assert.strictEqual(err.code, AxiosError.ERR_NETWORK);
+      assert.strictEqual(err.message, 'Network Error');
+    }
+  );
+
+  it('should preserve the code of a non-TypeError rejection', async () => {
+    const [, request] = rejectWith(Object.assign(new Error('boom'), { code: 'ECONNRESET' }));
+    const err = await request.catch((e) => e);
+
+    assert.ok(err instanceof AxiosError);
+    assert.strictEqual(err.code, 'ECONNRESET');
+    assert.strictEqual(err.message, 'boom');
+  });
+
+  it('should rethrow an AxiosError raised by fetch without rewrapping it', async () => {
+    const original = new AxiosError('already wrapped', AxiosError.ERR_BAD_RESPONSE);
+    const [, request] = rejectWith(original);
+    const err = await request.catch((e) => e);
+
+    assert.strictEqual(err, original);
+    assert.strictEqual(err.code, AxiosError.ERR_BAD_RESPONSE);
+  });
+
+  it('should call the configured fetch exactly once for a successful request', async () => {
+    const okFetch = createFetchStub(() => new Response('ok', { status: 200 }));
+    const response = await stubbedAxios.get('/things', { env: { fetch: okFetch } });
+
+    assert.strictEqual(response.status, 200);
+    assert.strictEqual(response.data, 'ok');
+    assert.strictEqual(okFetch.mock.calls.length, 1);
+    assert.strictEqual(okFetch.requests.length, 1);
+  });
+
+  it('should resolve an empty body for a 204 response', async () => {
+    const emptyFetch = createFetchStub(() => new Response(null, { status: 204 }));
+    const response = await stubbedAxios.get('/things', { env: { fetch: emptyFetch } });
+
+    assert.strictEqual(response.status, 204);
+    assert.strictEqual(response.data, '');
   });
 });

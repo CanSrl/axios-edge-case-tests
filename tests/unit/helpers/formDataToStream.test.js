@@ -144,3 +144,126 @@ describe('formDataToStream', () => {
     expect(Buffer.byteLength(body, 'utf8')).toBe(reportedLength);
   });
 });
+
+describe('formDataToStream argument validation', () => {
+  it.each([
+    ['null', null],
+    ['undefined', undefined],
+    ['a plain object', { a: 1 }],
+    ['a string', 'form'],
+    ['an array', []],
+  ])('should throw a TypeError for %s', (description, value) => {
+    expect(() => formDataToStream(value)).toThrow(TypeError);
+    expect(() => formDataToStream(value)).toThrow('FormData instance required');
+  });
+
+  it.each([
+    ['an empty boundary', ''],
+    ['a boundary longer than 70 characters', 'b'.repeat(71)],
+  ])('should reject %s', (description, boundary) => {
+    expect(() => formDataToStream(new SpecFormData(), null, { boundary })).toThrow(
+      'boundary must be 1-70 characters long'
+    );
+  });
+
+  it.each([
+    ['a single character boundary', 'b'],
+    ['a 70 character boundary', 'b'.repeat(70)],
+  ])('should accept %s', (description, boundary) => {
+    expect(() => formDataToStream(new SpecFormData(), null, { boundary })).not.toThrow();
+  });
+
+  it('should not require a headers handler', () => {
+    const form = new SpecFormData();
+    form.append('field', 'value');
+
+    expect(() => formDataToStream(form)).not.toThrow();
+  });
+});
+
+describe('formDataToStream computed headers', () => {
+  it('should report the boundary in the content type', () => {
+    let computed;
+
+    formDataToStream(
+      new SpecFormData(),
+      (headers) => {
+        computed = headers;
+      },
+      { boundary: 'my-boundary' }
+    );
+
+    expect(computed['Content-Type']).toBe('multipart/form-data; boundary=my-boundary');
+  });
+
+  it('should build the boundary from the tag and size options', () => {
+    let computed;
+
+    formDataToStream(
+      new SpecFormData(),
+      (headers) => {
+        computed = headers;
+      },
+      { tag: 'custom-tag', size: 5 }
+    );
+
+    const boundary = computed['Content-Type'].split('boundary=')[1];
+
+    expect(boundary.startsWith('custom-tag-')).toBe(true);
+    expect(boundary).toHaveLength('custom-tag-'.length + 5);
+  });
+
+  it('should emit only the footer for an empty form', async () => {
+    let computed;
+
+    const stream = formDataToStream(
+      new SpecFormData(),
+      (headers) => {
+        computed = headers;
+      },
+      { boundary: 'empty-boundary' }
+    );
+
+    const body = await collect(stream);
+
+    expect(body).toBe('--empty-boundary--\r\n');
+    expect(computed['Content-Length']).toBe(Buffer.byteLength(body));
+  });
+
+  it('should count the content length of a multi-part form', async () => {
+    const form = new SpecFormData();
+    form.append('a', '1');
+    form.append(
+      'b',
+      makeBlobLike({ type: 'text/plain', name: 'b.txt', payload: Buffer.from('xyz') })
+    );
+
+    let computed;
+    const stream = formDataToStream(form, (headers) => {
+      computed = headers;
+    });
+
+    const body = await collect(stream);
+
+    expect(computed['Content-Length']).toBe(Buffer.byteLength(body));
+  });
+
+  it('should normalize bare newlines in string values to CRLF', async () => {
+    const form = new SpecFormData();
+    form.append('field', 'line1\nline2');
+
+    const body = await collect(formDataToStream(form, null, { boundary: 'nl-boundary' }));
+
+    expect(body).toContain('line1\r\nline2');
+  });
+
+  it('should keep existing CRLF sequences in string values intact', async () => {
+    const form = new SpecFormData();
+    form.append('field', 'line1\r\nline2');
+
+    const body = await collect(formDataToStream(form, null, { boundary: 'crlf-boundary' }));
+
+    expect(body).toContain('line1\r\nline2');
+    expect(body).not.toContain('line1\r\r\nline2');
+  });
+});
